@@ -1,0 +1,10 @@
+# Development and CI only. Kept out of requirements.txt so the runtime
+# image does not ship a test runner and a linter - fewer packages in the
+# image is fewer CVEs to triage against something that never executes in
+# production.
+
+-r requirements.txt
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+ruff==0.17.1

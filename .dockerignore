@@ -1,0 +1,43 @@
+# Everything that must not enter the build context.
+#
+# The first entry is the important one. `.env` holds the signing key and the
+# provider credentials; a COPY that picks it up bakes them into an image
+# layer, where they survive being deleted in a later layer and travel with
+# the image to every registry it is pushed to.
+.env
+.env.*
+!.env.example
+
+# Secrets by other names.
+*.pem
+*.key
+secrets/
+
+# Local state that would otherwise be copied over the container's own.
+var/
+.venv/
+venv/
+
+# Noise: large, useless in the image, and a cache invalidation on every edit.
+.git/
+.github/
+.claude/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Tests and docs do not execute in the runtime image.
+tests/
+docs/
+*.md
+!README.md
+
+# Editor and OS droppings.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

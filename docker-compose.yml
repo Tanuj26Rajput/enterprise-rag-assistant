@@ -1,0 +1,140 @@
+# A complete local deployment: database, API, ingestion worker, frontend.
+#
+# This file is shaped like the production topology rather than like the
+# shortest thing that boots, because the parts that differ between the two
+# are exactly the parts that break on the first real deploy: migrations as a
+# separate step, the worker as its own process, the frontend holding no
+# credentials, and secrets arriving from the environment rather than from an
+# image layer.
+#
+#   cp .env.example .env     # then fill in SECRET_KEY and the provider keys
+#   docker compose up --build
+#
+# The frontend is then on http://localhost:8501 and the API on
+# http://localhost:8000/docs.
+
+name: enterprise-rag
+
+services:
+  # ------------------------------------------------------------- database ---
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # Published on loopback only. Binding 5432 to every interface is how a
+    # development database ends up reachable from the office network.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      # The -U and -d are not optional: bare `pg_isready` checks the server is
+      # accepting connections, not that *this* database exists, and during
+      # first-boot initialisation those are different answers.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag} -d ${POSTGRES_DB:-rag}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ------------------------------------------------------------ migrations ---
+  # A one-shot service rather than something the API does at start-up. Several
+  # API replicas booting together would otherwise race to apply the same
+  # migration, and `depends_on: service_completed_successfully` gives exactly
+  # the ordering guarantee that race needs.
+  migrate:
+    build:
+      context: .
+      target: runtime
+    command: ["migrate"]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://rag:rag@postgres:5432/rag}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ------------------------------------------------------------------ api ---
+  api:
+    build:
+      context: .
+      target: runtime
+    command: ["api"]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://rag:rag@postgres:5432/rag}
+      # The API enqueues and the worker runs. With `inline` the API would do
+      # ingestion in-request and the worker below would idle - which is the
+      # right choice for a single-container deployment and the wrong one here.
+      INGESTION_MODE: background
+      # One uvicorn worker per container, scaled with replicas instead. Two
+      # processes in one container would both open the same Chroma SQLite
+      # file, which is the limitation documented in docs/trade-offs.md; it
+      # also gives the orchestrator no way to see that half a container is
+      # unhealthy.
+      WEB_CONCURRENCY: 1
+    ports:
+      - "8000:8000"
+    volumes:
+      - rag-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # --------------------------------------------------------------- worker ---
+  worker:
+    build:
+      context: .
+      target: runtime
+    command: ["worker"]
+    env_file: [.env]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://rag:rag@postgres:5432/rag}
+      INGESTION_MODE: background
+    volumes:
+      # The same volume as the API, and that is a requirement rather than a
+      # convenience: the worker reads the uploaded file the API wrote and
+      # writes the vectors the API later searches. Two separate volumes would
+      # produce documents that ingest "successfully" and then return nothing.
+      - rag-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # Safe to raise: workers claim jobs with FOR UPDATE SKIP LOCKED, so N of
+    # them divide the queue with no coordination. See the Chroma caveat in
+    # docs/trade-offs.md before going past 1 with the embedded store.
+    deploy:
+      replicas: 1
+
+  # ------------------------------------------------------------- frontend ---
+  frontend:
+    build:
+      context: .
+      target: runtime
+    command: ["frontend"]
+    # Deliberately no `env_file`. This process is given one variable - the URL
+    # of the API - and nothing else. It cannot leak a database password or a
+    # provider key because it was never handed one, which is a stronger
+    # guarantee than any amount of care about what the UI renders.
+    environment:
+      RAG_API_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  # Uploaded originals and the Chroma index. Named rather than anonymous so
+  # `docker compose down` does not take the corpus with it.
+  rag-data:

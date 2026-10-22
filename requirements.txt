@@ -1,35 +1,42 @@
+# Direct dependencies, pinned to the versions this project is developed and
+# tested against. Transitive dependencies are left to pip's resolver.
+#
+# Why pin at all: an unpinned requirements file means a rebuild six weeks from
+# now installs different code than the build that was tested, and the first
+# anyone hears of it is a failure in production. Why pin only the direct set:
+# a full lock file (pip-compile, uv, Poetry) is the right answer for a team,
+# but it must be generated on the target platform, and the versions below are
+# the ones actually exercised here. See docs/environment.md.
+
 # API and configuration
-fastapi
-uvicorn[standard]
-pydantic-settings
-python-multipart
-email-validator
+fastapi==0.159.1
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+pydantic-settings==2.16.1
+python-multipart==0.0.32
+email-validator==2.3.0
 
 # PostgreSQL ORM and migrations
-sqlalchemy
-psycopg[binary]
-alembic
+sqlalchemy[asyncio]==2.1.6
+psycopg[binary]==3.3.6
+alembic==1.20.1
 
 # Authentication and security
-python-jose[cryptography]
-pwdlib[argon2]
+python-jose[cryptography]==3.5.0
+pwdlib[argon2]==0.3.1
 
-# LLM provider
-openai
-httpx
+# LLM provider (OpenAI-compatible client, pointed at OpenRouter)
+openai==3.36.1
+httpx==0.28.1
 
 # Vector database
-chromadb
+chromadb==1.5.9
 
 # Document processing
-pymupdf
-python-docx
-tiktoken
+pymupdf==2.0
+python-docx==1.2.0
+tiktoken==0.14.0
 
 # Frontend
-streamlit
-
-# Testing and code quality
-pytest
-pytest-asyncio
-ruff
+streamlit==1.66.1
+requests==2.34.2
