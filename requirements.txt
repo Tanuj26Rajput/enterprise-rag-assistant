@@ -1,0 +1,35 @@
+# API and configuration
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-multipart
+email-validator
+
+# PostgreSQL ORM and migrations
+sqlalchemy
+psycopg[binary]
+alembic
+
+# Authentication and security
+python-jose[cryptography]
+pwdlib[argon2]
+
+# LLM provider
+openai
+httpx
+
+# Vector database
+chromadb
+
+# Document processing
+pymupdf
+python-docx
+tiktoken
+
+# Frontend
+streamlit
+
+# Testing and code quality
+pytest
+pytest-asyncio
+ruff
