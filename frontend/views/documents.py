@@ -143,10 +143,7 @@ def _document_list(namespace: dict[str, Any], collection: dict[str, Any]) -> Non
     header, refresh = st.columns([4, 1])
     header.subheader(f"{page['total']} document(s)")
     if waiting:
-        header.caption(
-            f"{len(waiting)} still being processed. "
-            "This page does not poll — refresh to see the latest."
-        )
+        header.caption(f"{len(waiting)} still being processed.")
     if refresh.button("Refresh", icon=":material/refresh:", use_container_width=True):
         st.rerun()
 
@@ -159,9 +156,11 @@ def _document_row(namespace: dict[str, Any], document: dict[str, Any]) -> None:
     with st.container(border=True):
         title, state, actions = st.columns([4, 2, 1])
         title.markdown(f"**{document.get('title') or document['filename']}**")
+        # The MIME type is dropped: it restates the file extension, and
+        # `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+        # tells a reader nothing the filename did not.
         title.caption(
-            f"{document['mime_type']} · {document['size_bytes'] / 1024:.0f} KB · "
-            f"uploaded {when(document.get('created_at'))}"
+            f"{document['size_bytes'] / 1024:.0f} KB · uploaded {when(document.get('created_at'))}"
         )
         state.markdown(status_badge(status), help=status_help(status))
         if status == "ready":

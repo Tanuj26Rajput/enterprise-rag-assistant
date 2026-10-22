@@ -123,16 +123,3 @@ def answer_quality(done: dict[str, Any]) -> None:
         st.caption("⚠️ The answer hit the length limit and may be cut short.")
     if not done.get("grounded", True):
         st.caption("⚠️ This answer cites no passage — treat it with care.")
-
-
-def secret_warning(leaked: list[str]) -> None:
-    """Tell the operator their frontend can read backend credentials."""
-    if not leaked:
-        return
-    st.warning(
-        "This frontend process can read backend-only variables: "
-        + ", ".join(f"`{name}`" for name in leaked)
-        + ". The UI never sends them anywhere, but it should not be able to see "
-        "them either — give the frontend its own environment with `RAG_API_URL` alone.",
-        icon=":material/key_off:",
-    )

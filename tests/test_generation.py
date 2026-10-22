@@ -27,7 +27,10 @@ from openai import (
 )
 
 from app.llm.base import LLMConfigurationError, LLMError, LLMUnavailable
-from app.llm.openai_compatible import OpenAICompatibleChatProvider
+from app.llm.openai_compatible import (
+    MAX_RETRY_AFTER_SECONDS,
+    OpenAICompatibleChatProvider,
+)
 from app.llm.prompts import INSUFFICIENT_EVIDENCE, REFUSAL_MESSAGE
 from tests.conftest import make_collection, make_namespace, signed_in
 from tests.fakes import FakeChatProvider
@@ -828,3 +831,197 @@ def _completion(
 
 def _empty_completion() -> _Response:
     return _Response([], "anthropic/claude-sonnet-5.5")
+
+
+class TestAStreamIsRetriedOnlyBeforeTheFirstToken:
+    """Where the retry boundary sits, and why it sits there.
+
+    A transient failure at admission time - a rate limit, a router hiccup -
+    has produced nothing the user has seen, so re-asking is invisible and is
+    exactly what the non-streaming path already does. Once a token is out,
+    re-asking would splice two different completions together, so the failure
+    is reported instead.
+
+    This mattered in practice: an OpenRouter free-tier key regularly gets
+    `429 openrouter_admission_control` ("could not verify available credits
+    for this request in time. Retry shortly."), with a `Retry-After` header.
+    The provider is asking to be retried. Not retrying turned that into a
+    dead conversation turn.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self, monkeypatch: pytest.MonkeyPatch) -> list[float]:
+        slept: list[float] = []
+
+        async def instant(seconds: float) -> None:
+            slept.append(seconds)
+
+        monkeypatch.setattr("app.llm.openai_compatible.asyncio.sleep", instant)
+        return slept
+
+    @staticmethod
+    def _request() -> Any:
+        from app.llm.base import ChatMessage, ChatRequest
+
+        return ChatRequest(messages=[ChatMessage(role="user", content="hello")])
+
+    @staticmethod
+    def _rate_limited(retry_after: str | None = None) -> RateLimitError:
+        response = _http_response(429)
+        if retry_after is not None:
+            response.headers["retry-after"] = retry_after
+        return RateLimitError("rate limited", response=response, body=None)
+
+    @staticmethod
+    def _events(*deltas: str) -> Any:
+        """A stub stream yielding one content delta per argument."""
+
+        class _Delta:
+            def __init__(self, content: str | None) -> None:
+                self.content = content
+
+        class _Choice:
+            def __init__(self, content: str | None) -> None:
+                self.delta = _Delta(content)
+                self.finish_reason = None
+
+        class _Event:
+            def __init__(self, content: str | None) -> None:
+                self.choices = [_Choice(content)]
+                self.model = "anthropic/claude-sonnet-5.5"
+                self.usage = None
+
+        class _Stream:
+            def __aiter__(self) -> Any:
+                async def gen() -> Any:
+                    for d in deltas:
+                        yield _Event(d)
+
+                return gen()
+
+        return _Stream()
+
+    async def test_a_rate_limit_before_the_first_token_is_retried(self) -> None:
+        provider = build_provider(max_attempts=3)
+        attempts: list[int] = []
+
+        async def create(**_kwargs: Any) -> Any:
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise self._rate_limited()
+            return self._events("the answer")
+
+        provider._client.chat.completions.create = create  # type: ignore[assignment]
+
+        chunks = [c async for c in provider.stream(self._request())]
+
+        assert len(attempts) == 3, "the stream should have been re-opened"
+        assert "".join(c.delta for c in chunks if c.delta) == "the answer"
+        assert chunks[-1].done
+
+    async def test_a_failure_after_the_first_token_is_not_retried(self) -> None:
+        """No second attempt, because the user is already reading an answer."""
+        provider = build_provider(max_attempts=3)
+        attempts: list[int] = []
+
+        async def create(**_kwargs: Any) -> Any:
+            attempts.append(1)
+
+            class _Stream:
+                def __aiter__(self) -> Any:
+                    async def gen() -> Any:
+                        class _D:
+                            content = "half an "
+
+                        class _C:
+                            delta = _D()
+                            finish_reason = None
+
+                        class _E:
+                            def __init__(self) -> None:
+                                self.choices = [_C()]
+                                self.model = "m"
+                                self.usage = None
+
+                        yield _E()
+                        raise TestAStreamIsRetriedOnlyBeforeTheFirstToken._rate_limited()
+
+                    return gen()
+
+            return _Stream()
+
+        provider._client.chat.completions.create = create  # type: ignore[assignment]
+
+        seen: list[str] = []
+        with pytest.raises(LLMUnavailable):
+            async for chunk in provider.stream(self._request()):
+                if chunk.delta:
+                    seen.append(chunk.delta)
+
+        assert seen == ["half an "], "the partial answer should still reach the caller"
+        assert len(attempts) == 1, "a retry here would splice two answers together"
+
+    async def test_the_providers_retry_after_is_honoured(self, _no_backoff: list[float]) -> None:
+        """OpenRouter says when its window resets; guessing is worse."""
+        provider = build_provider(max_attempts=2)
+        calls: list[int] = []
+
+        async def create(**_kwargs: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 1:
+                raise self._rate_limited(retry_after="10")
+            return self._events("ok")
+
+        provider._client.chat.completions.create = create  # type: ignore[assignment]
+
+        [c async for c in provider.stream(self._request())]
+
+        assert _no_backoff == [10.0]
+
+    async def test_an_absurd_retry_after_is_capped(self, _no_backoff: list[float]) -> None:
+        """A remote system must not be able to pin a request open for an hour."""
+        provider = build_provider(max_attempts=2)
+        calls: list[int] = []
+
+        async def create(**_kwargs: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 1:
+                raise self._rate_limited(retry_after="3600")
+            return self._events("ok")
+
+        provider._client.chat.completions.create = create  # type: ignore[assignment]
+
+        [c async for c in provider.stream(self._request())]
+
+        assert _no_backoff == [MAX_RETRY_AFTER_SECONDS]
+
+    async def test_exhausting_the_attempts_reports_unavailable(self) -> None:
+        provider = build_provider(max_attempts=2)
+        calls: list[int] = []
+
+        async def create(**_kwargs: Any) -> Any:
+            calls.append(1)
+            raise self._rate_limited()
+
+        provider._client.chat.completions.create = create  # type: ignore[assignment]
+
+        with pytest.raises(LLMUnavailable):
+            [c async for c in provider.stream(self._request())]
+
+        assert len(calls) == 2
+
+    async def test_a_configuration_error_is_never_retried(self) -> None:
+        """Re-sending a rejected key just rejects it again, more slowly."""
+        provider = build_provider(max_attempts=3)
+        calls: list[int] = []
+
+        async def create(**_kwargs: Any) -> Any:
+            calls.append(1)
+            raise AuthenticationError("bad key", response=_http_response(401), body=None)
+
+        provider._client.chat.completions.create = create  # type: ignore[assignment]
+
+        with pytest.raises(LLMConfigurationError):
+            [c async for c in provider.stream(self._request())]
+
+        assert len(calls) == 1

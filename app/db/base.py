@@ -33,6 +33,25 @@ class Base(DeclarativeBase):
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
+    # Fetch server-computed columns in the same statement, via RETURNING.
+    #
+    # Without this, `updated_at`'s server-side `onupdate` makes every UPDATE
+    # leave the attribute expired: SQLAlchemy cannot know what the database
+    # clock produced, so it defers a refetch to the next attribute access.
+    # Under asyncio that refetch is fatal rather than merely slow. Serializing
+    # the row with `Model.model_validate(obj)` reads the attribute from
+    # pydantic's *synchronous* validator, where the deferred load has no
+    # greenlet to run in, and the request dies with `MissingGreenlet` - a 500
+    # on every update-then-return endpoint.
+    #
+    # `expire_on_commit=False` on the session does not help: the expiry is set
+    # by the flush that issued the UPDATE, not by the commit.
+    #
+    # SQLAlchemy's default here is "auto", which uses RETURNING for INSERT but
+    # not for UPDATE. PostgreSQL supports RETURNING on both, so the eager fetch
+    # costs no extra round trip and keeps the database clock authoritative.
+    __mapper_args__ = {"eager_defaults": True}
+
     # Maps bare Python annotations to PostgreSQL types so models can be written
     # as `Mapped[datetime]` / `Mapped[dict[str, Any]]` without repeating types.
     type_annotation_map = {

@@ -127,7 +127,7 @@ Point `DATABASE_URL` at 6543 for containers and serverless; point
 | `OPENAI_API_KEY` | unset | Used only when `LLM_PROVIDER=openai`. |
 | `LLM_BASE_URL` | provider default | |
 | `LLM_TEMPERATURE` | `0.1` | This is extractive QA over supplied passages. Creative variation here is a defect. |
-| `LLM_MAX_TOKENS` | `1024` | |
+| `LLM_MAX_TOKENS` | `1024` | Covers reasoning tokens too, and reasoning comes first. A reasoning model can exhaust the budget before writing anything and return empty content, which surfaces as a blank answer rather than an error. Measured: `stepfun/step-3.7-flash` and `anthropic/claude-sonnet-5.5` use none; `stepfun/step-3.5-flash` does. |
 | `LLM_REQUEST_TIMEOUT` | `60` | |
 | `LLM_MAX_ATTEMPTS` | `3` | Retries apply to transient failures only. |
 | `OPENROUTER_SITE_URL`, `OPENROUTER_APP_NAME` | unset | Attribution headers, sent to OpenRouter only. |
@@ -147,9 +147,9 @@ embeddings endpoint at all.
 | Variable | Default | Notes |
 |---|---|---|
 | `EMBEDDING_PROVIDER` | `openai` | `openai`, `openrouter` or `hash`. |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | Must match the provider's naming. `openai/text-embedding-3-small` with `EMBEDDING_PROVIDER=openai` is a start-up error, and the message says exactly that. |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Must match the provider's naming. `openai/text-embedding-3-small` with `EMBEDDING_PROVIDER=openai` is a start-up error, and the message says exactly that. With `EMBEDDING_PROVIDER=openrouter` the vendor prefix is required instead: `nvidia/nemotron-3-embed-1b`, or its `:free` variant. **A collection's width is fixed at creation — changing this strands existing collections rather than migrating them.** |
 | `EMBEDDING_API_KEY` | unset | Falls back to `OPENAI_API_KEY` *only* when the provider is `openai`. |
-| `EMBEDDING_DIMENSIONS` | from the registry | Set it to shorten a model that supports shortening, or to vouch for a model the registry does not know. Checked against the first real response. |
+| `EMBEDDING_DIMENSIONS` | from the registry | Set it to shorten a model that supports shortening, or to vouch for a model the registry does not know. Checked against the first real response, so a wrong number fails before anything is indexed rather than after. Models already registered (`app/embeddings/registry.py`) need no value: `text-embedding-3-small` 1536, `text-embedding-3-large` 3072, `nvidia/nemotron-3-embed-1b` and `:free` 2048, `hash-256` 256. |
 | `EMBEDDING_BATCH_SIZE` | `64` | |
 | `EMBEDDING_MAX_ATTEMPTS` | `3` | |
 | `EMBEDDING_REQUEST_TIMEOUT` | `60` | |

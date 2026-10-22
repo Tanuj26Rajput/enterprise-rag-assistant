@@ -33,8 +33,8 @@ def build_embedding_provider(settings: Settings | None = None) -> EmbeddingProvi
     api_key = settings.embedding_api_key_value
     if not api_key:
         raise EmbeddingConfigurationError(
-            f"EMBEDDING_PROVIDER={spec.provider} needs an API key: set EMBEDDING_API_KEY "
-            "(or OPENAI_API_KEY for the openai provider)."
+            f"EMBEDDING_PROVIDER={spec.provider} needs an API key: set EMBEDDING_API_KEY, "
+            f"or the provider's own key ({spec.provider.upper()}_API_KEY)."
         )
 
     base_url = settings.embedding_base_url

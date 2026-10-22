@@ -104,10 +104,11 @@ def _sidebar(namespace: dict[str, Any], collections: list[dict[str, Any]]) -> di
 def _thread(namespace: dict[str, Any], conversation: dict[str, Any]) -> None:
     header, actions = st.columns([4, 1])
     header.title(conversation.get("title") or "Untitled conversation")
-    header.caption(
-        f"Model `{conversation['model']}` · {conversation['message_count']} messages · "
-        f"{conversation['total_tokens']} tokens"
-    )
+    # Deliberately not the model id or the token count: which model answered
+    # and what it cost are operator facts, available on the API and in the
+    # logs. A reader of the conversation needs neither to judge the answer,
+    # and naming the model invites trusting it over the citations.
+    header.caption(f"{conversation['message_count']} messages")
     with actions.popover("Manage", use_container_width=True):
         new_title = st.text_input("Rename", value=conversation.get("title") or "")
         rename = st.button("Save", use_container_width=True)

@@ -23,9 +23,12 @@ from app.embeddings.registry import (
 def base_settings(**overrides: object) -> Settings:
     """Settings built from explicit values only.
 
-    The embedding keys are pinned to the field defaults rather than left to
-    the environment: conftest sets them for the suite as a whole, and these
-    tests are about what the defaults and the validators do.
+    ``_env_file=None`` is load-bearing, not tidiness. Without it
+    pydantic-settings falls back to the developer's real ``.env`` for every
+    field not passed here, so a test asserting "this key is absent" passes or
+    fails depending on whose machine it runs on - and a failure prints the
+    real credential into the diff. These tests are about what the defaults
+    and validators do, so they are given no ambient configuration at all.
     """
     defaults: dict[str, object] = {
         "DATABASE_URL": "postgresql://test:test@localhost:5432/test",
@@ -34,7 +37,7 @@ def base_settings(**overrides: object) -> Settings:
         "EMBEDDING_PROVIDER": "openai",
         "EMBEDDING_MODEL": "text-embedding-3-small",
     }
-    return Settings(**{**defaults, **overrides})  # type: ignore[arg-type]
+    return Settings(_env_file=None, **{**defaults, **overrides})  # type: ignore[arg-type]
 
 
 class TestRegistry:
@@ -103,6 +106,33 @@ class TestOpenRouterIsNotAssumedCompatible:
         )
 
         assert settings.embedding_api_key_value is None
+
+    def test_the_openrouter_key_is_reused_for_the_openrouter_provider(self) -> None:
+        """Falling back within one vendor is safe, and is what an operator expects.
+
+        The rule is "never across vendors", not "never": OPENROUTER_API_KEY
+        with EMBEDDING_PROVIDER=openrouter is unambiguous, and requiring a
+        duplicate EMBEDDING_API_KEY for it would be ceremony, not safety.
+        """
+        settings = base_settings(
+            EMBEDDING_PROVIDER="openrouter",
+            EMBEDDING_MODEL="nvidia/nemotron-3-embed-1b:free",
+            EMBEDDING_DIMENSIONS=2048,
+            OPENROUTER_API_KEY="sk-or-example",
+        )
+
+        assert settings.embedding_api_key_value == "sk-or-example"
+
+    def test_an_explicit_embedding_key_still_wins(self) -> None:
+        settings = base_settings(
+            EMBEDDING_PROVIDER="openrouter",
+            EMBEDDING_MODEL="some/embedding-model",
+            EMBEDDING_DIMENSIONS=768,
+            OPENROUTER_API_KEY="sk-or-fallback",
+            EMBEDDING_API_KEY="sk-explicit",
+        )
+
+        assert settings.embedding_api_key_value == "sk-explicit"
 
     def test_the_openai_key_is_reused_for_the_openai_provider(self) -> None:
         settings = base_settings(EMBEDDING_PROVIDER="openai", OPENAI_API_KEY="sk-example-key")

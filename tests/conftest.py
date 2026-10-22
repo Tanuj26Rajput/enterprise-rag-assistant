@@ -56,6 +56,11 @@ from tests.fakes import (
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(
+        # Never read the developer's real .env: a field this fixture does not
+        # pin would otherwise come from it, which makes the suite behave
+        # differently per machine and can print a live credential into a
+        # failure diff.
+        _env_file=None,
         DATABASE_URL="postgresql://test:test@localhost:5432/test",
         ENVIRONMENT="test",
         SECRET_KEY="test-secret-key-that-is-long-enough-abc",

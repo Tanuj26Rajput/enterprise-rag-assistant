@@ -14,8 +14,11 @@ currently signed-in users have - and nothing else.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 #: Any of these in the environment would mean a secret has leaked into the
 #: frontend's process. Checked at start-up rather than trusted, because the
@@ -55,13 +58,30 @@ def load_settings() -> FrontendSettings:
 
 
 def leaked_secrets() -> list[str]:
-    """Backend-only variables that are visible to this process.
-
-    Reported in the UI rather than raising: refusing to start would be
-    theatre, since the variable being *set* is not the leak - shipping it to
-    a browser would be, and this app never does. What it is worth doing is
-    telling whoever deployed it that their frontend process can read the
-    database password, because that is one container compromise away from
-    mattering.
-    """
+    """Backend-only variables that are visible to this process."""
     return [name for name in FORBIDDEN_ENV_VARS if os.getenv(name)]
+
+
+def warn_about_leaked_secrets() -> None:
+    """Log, once, if this process can read backend-only variables.
+
+    Logged rather than rendered. The condition is real - a shared `.env` file
+    hands the browser-facing process the database password - but it is a
+    deployment mistake, and the person who can fix it reads logs, not the
+    chat UI. Every end user seeing a warning they cannot act on is noise that
+    trains people to ignore warnings.
+
+    Not raised either: refusing to start would be theatre, since the variable
+    being *set* is not the leak. Shipping it to a browser would be, and this
+    app never does.
+    """
+    leaked = leaked_secrets()
+    if not leaked:
+        return
+    logger.warning(
+        "This frontend process can read backend-only variables: %s. "
+        "The UI never sends them anywhere, but it should not be able to see "
+        "them either - give the frontend its own environment with RAG_API_URL "
+        "alone (docker-compose.yml does this deliberately).",
+        ", ".join(leaked),
+    )

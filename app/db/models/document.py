@@ -121,10 +121,30 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
         CheckConstraint("token_count >= 0", name="token_count_non_negative"),
         CheckConstraint("page_count IS NULL OR page_count > 0", name="page_count_positive"),
         CheckConstraint("char_length(checksum) = 64", name="checksum_is_sha256"),
-        # A failed document must explain itself; a successful one must not
-        # carry a stale error.
+        # A failed document must explain itself; a *live* one must not carry
+        # a stale error. The two tombstone states are deliberately exempt.
+        #
+        # This was once written as the biconditional
+        # `(status = 'failed') = (error_message IS NOT NULL)`, which read
+        # well and was wrong: deleting a failed document moves it to
+        # `deleting` and then `archived` while its explanation stays put, so
+        # the constraint rejected the UPDATE and **no failed document could
+        # ever be deleted** - precisely the ones a user most wants gone.
+        #
+        # Clearing the message on delete would also satisfy the old rule, but
+        # at the cost of the answer to "why is this gone?" at the exact
+        # moment it is being asked. A tombstone keeping its cause is the more
+        # useful record, so the constraint stops governing a document once it
+        # has left the live states.
         CheckConstraint(
-            "(status = 'failed') = (error_message IS NOT NULL)",
+            """
+            CASE status
+                WHEN 'failed' THEN error_message IS NOT NULL
+                WHEN 'deleting' THEN TRUE
+                WHEN 'archived' THEN TRUE
+                ELSE error_message IS NULL
+            END
+            """,
             name="error_message_matches_status",
         ),
     )

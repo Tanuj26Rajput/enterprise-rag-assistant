@@ -298,16 +298,23 @@ class Settings(BaseSettings):
 
     @property
     def embedding_api_key_value(self) -> str | None:
-        """The embedding key, falling back to the chat key for OpenAI only.
+        """The embedding key, falling back only within the same vendor.
 
-        The fallback stops at OpenAI deliberately. Sending an OpenAI key to
-        OpenRouter - or any other base URL - would hand the credential to a
-        third party because two unrelated settings happened to be adjacent.
+        ``EMBEDDING_API_KEY`` wins. Otherwise each provider falls back to its
+        own named key and no other: an OpenAI key is never sent to OpenRouter
+        and vice versa, because two credentials sitting in the same ``.env``
+        is not consent to hand one of them to the other vendor.
+
+        Falling back *within* a provider is a different matter and is safe -
+        ``EMBEDDING_PROVIDER=openrouter`` with ``OPENROUTER_API_KEY`` set is
+        unambiguous, and it mirrors what ``llm_api_key_value`` already does.
         """
         if self.embedding_api_key is not None:
             return self.embedding_api_key.get_secret_value()
         if self.embedding_provider == "openai" and self.openai_api_key is not None:
             return self.openai_api_key.get_secret_value()
+        if self.embedding_provider == "openrouter" and self.openrouter_api_key is not None:
+            return self.openrouter_api_key.get_secret_value()
         return None
 
     # --------------------------------------------------------------- llm ---

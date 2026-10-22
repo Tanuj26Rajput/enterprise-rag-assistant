@@ -23,7 +23,7 @@ from app.db.session import get_db
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.factory import get_embedding_provider
 from app.llm.base import ChatProvider
-from app.llm.factory import get_chat_provider
+from app.llm.factory import LazyChatProvider
 from app.repositories.audit import AuditRepository
 from app.repositories.collection import CollectionRepository
 from app.repositories.conversation import ConversationRepository, MessageRepository
@@ -217,7 +217,13 @@ def get_message_repository(session: SessionDep) -> MessageRepository:
 
 
 def get_llm() -> ChatProvider:
-    return get_chat_provider()
+    """Hand out a provider that builds itself on first use.
+
+    Not the provider itself: `ChatService` is a dependency of every
+    conversation endpoint, most of which never generate. Constructing
+    eagerly made an unset LLM key a 500 on listing and renaming too.
+    """
+    return LazyChatProvider()
 
 
 def get_answer_service(

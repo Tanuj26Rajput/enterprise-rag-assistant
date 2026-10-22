@@ -148,7 +148,13 @@ class ChatService:
             namespace_id=namespace_id,
             user_id=user.id,
             title=(title or "").strip() or None,
-            model=self._llm.model,
+            # The configured model id, read from settings rather than from the
+            # provider. Starting a conversation makes no model call, and it
+            # should not require a working provider to make one: asking the
+            # provider for its name would build it, so a deployment with no
+            # LLM key could not even open a chat window. The two values are
+            # the same - the provider is constructed from this setting.
+            model=self._settings.llm_model,
             collection_ids=[str(collection_id)],
         )
         await self._conversations.add(conversation)
@@ -374,11 +380,18 @@ class ChatService:
                     buffer.append(chunk.delta)
                     yield chunk.delta
         except LLMError as exc:
+            # The *translated* message is what gets persisted, because this
+            # field is rendered in the UI from the stored turn. `str(exc)`
+            # here is the provider's own error payload, and upstream errors
+            # routinely quote the request back - which for this service means
+            # the prompt and the retrieved passages. The raw text stays in
+            # the logs, joined to the response by the request id.
+            translated = translate_llm_error(exc)
             outcome.text = "".join(buffer)
-            outcome.error = str(exc)
+            outcome.error = translated.message
             outcome.finish_reason = FINISH_UPSTREAM_ERROR
             self._finalize(context, outcome)
-            raise translate_llm_error(exc) from exc
+            raise translated from exc
         finally:
             # Runs on the normal path, on an upstream failure, and when the
             # consumer abandons the generator. Closing the upstream stream is

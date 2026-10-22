@@ -44,10 +44,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.deps import VectorStoreDep
 from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
-from app.core.exceptions import AppError
+from app.core.exceptions import AppError, UpstreamMisconfigured
 from app.core.logging import configure_logging, request_id_var
 from app.core.metrics import metrics, record_request
 from app.db.session import check_database_connection, dispose_engine
+from app.llm.base import LLMConfigurationError
 from app.schemas.common import ErrorDetail, ErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -282,6 +283,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             str(exc.detail),
             request,
         )
+
+    @app.exception_handler(LLMConfigurationError)
+    async def handle_llm_misconfigured(
+        request: Request, exc: LLMConfigurationError
+    ) -> JSONResponse:
+        """A missing or malformed LLM key is 503, not 500.
+
+        The answer service maps this itself, but only for errors raised
+        inside a generation call. A provider built lazily can raise it
+        from anywhere that first touches the model, and without this
+        handler such a call would reach the catch-all below and be
+        reported as an unexpected internal error - sending an operator
+        looking for a bug instead of an unset variable.
+        """
+        logger.error("Chat provider is misconfigured: %s", exc)
+        mapped = UpstreamMisconfigured()
+        return _error_response(mapped.status_code, mapped.code, mapped.message, request)
 
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:

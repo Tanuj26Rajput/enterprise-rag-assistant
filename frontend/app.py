@@ -26,13 +26,11 @@ if str(_ROOT) not in sys.path:
 # the path is set up, which is the one case where import order is load-bearing.
 import streamlit as st  # noqa: E402
 
-from frontend.components import secret_warning  # noqa: E402
-from frontend.config import leaked_secrets  # noqa: E402
+from frontend.config import warn_about_leaked_secrets  # noqa: E402
 from frontend.state import (  # noqa: E402
     current_namespace,
     is_signed_in,
     select_namespace,
-    settings,
     sign_out,
 )
 from frontend.views import auth, chat, documents, search, workspaces  # noqa: E402
@@ -46,6 +44,11 @@ PAGES = {
 
 
 def main() -> None:
+    # Once per process, to the log. A shared `.env` handing this process the
+    # database password is a deployment mistake worth reporting, but to the
+    # person who can fix it - not to every end user, who cannot.
+    warn_about_leaked_secrets()
+
     st.set_page_config(
         page_title="Enterprise RAG Assistant",
         page_icon="📚",
@@ -104,9 +107,6 @@ def _sidebar() -> str:
         if st.button("Sign out", use_container_width=True, icon=":material/logout:"):
             sign_out()
             st.rerun()
-
-        st.caption(f"API: `{settings().api_url}`")
-        secret_warning(leaked_secrets())
 
     return page
 

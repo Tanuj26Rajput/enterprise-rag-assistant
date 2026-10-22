@@ -4,8 +4,8 @@
 > was fixed, and — at least as importantly — what is still open and what was
 > never verified. A review that reports only its successes is not a review.
 
-**Date:** 2026-10-22 · **Scope:** the whole repository, against the
-Enterprise Multi-Document RAG Assistant requirements.
+**Date:** 2026-10-22, extended 2026-10-23 · **Scope:** the whole repository,
+against the Enterprise Multi-Document RAG Assistant requirements.
 
 ---
 
@@ -15,35 +15,64 @@ Everything below was actually run, and the output is what is quoted.
 
 | Check | Command | Result |
 |---|---|---|
-| Test suite | `pytest -q` | **472 passed**, 0 failed |
+| Test suite | `pytest -q` | **494 passed**, 0 failed |
 | Lint | `ruff check .` | All checks passed |
-| Format | `ruff format --check .` | 123 files already formatted |
-| Migration 0003 | `alembic upgrade 0002:head --sql` | Rendered correctly offline |
+| Format | `ruff format --check .` | 125 files already formatted |
 | Compose schema | `docker compose config --quiet` | Valid |
 | Entrypoint | `sh -n docker/entrypoint.sh` | Valid |
 
-### What was *not* verified
+### Verified in containers (2026-10-23)
+
+The Docker daemon became available, so the claims this document previously
+marked unverified were tested for real. **Doing so found four defects the
+484-test suite passes straight over** — see
+[defects found by running it](#defects-found-by-running-it-2026-10-23).
+
+Against image `enterprise-rag:test` on a throwaway `postgres:17-alpine`
+container, with `EMBEDDING_PROVIDER=hash` and **no** LLM key:
+
+| Check | Result |
+|---|---|
+| Image build | Succeeds, 1.72 GB |
+| `migrate` role | `0001 → 0002 → 0003` applied to a real database |
+| Migration 0003 round trip | `downgrade 0002` then `upgrade head` — both clean |
+| Resulting DDL | Both slugs are *partial* unique indexes; the old constraints are gone |
+| Slug reuse | A second live `handbook` is refused; reuse after soft delete succeeds |
+| `api` role | Serves; `/health` 200, `/ready` 200 with `database: ok, vector_store: ok` |
+| `worker` role | Claims a job, indexes it, document reaches `ready` with 1 chunk |
+| `frontend` role | Streamlit healthy; its environment carries **no** credentials |
+| Container healthchecks | `frontend` reports `healthy`, `worker` reports plain `Up` (see defect 13) |
+| Retrieval | `POST /search` returns the indexed chunk |
+| Cross-tenant access | Another tenant gets **404** on read, search and delete; **401** unauthenticated; owner **200** |
+| Metrics cardinality | Only route *templates* appear — no UUID reaches a label |
+| `/answer` with no key | **503 `upstream_misconfigured`**, not 500 |
+
+### What is *still* not verified
 
 Stated plainly, because the alternative is a reader assuming otherwise.
 
-- **The Docker image was never built.** The Docker daemon was not running in
-  this environment (`open //./pipe/dockerDesktopLinuxEngine: The system
-  cannot find the file specified`). The Dockerfile and compose file are
-  syntactically valid and the compose schema validates; **no container has
-  been built, started, or health-checked.** Build it before trusting it.
-- **No migration was applied to a live database.** `0002_ingestion_jobs` and
-  `0003_partial_slug_uniqueness` are both **pending** against the configured
-  Supabase instance. They were rendered to SQL offline and reviewed, not run.
-  Apply them in a maintenance window — `0002` adds enum values and `0003`
-  rebuilds two unique indexes.
-- **No test runs against live PostgreSQL.** The suite fakes the SQL layer.
-  Constraints, cascades and the `SKIP LOCKED` claim are therefore asserted
-  against the model metadata and against fakes, not against a server. See
-  [open gaps](#known-gaps).
+- **The schema of the project's Supabase instance was not inspected after
+  migrating.** `0002` and `0003` were applied there by the author on
+  2026-10-23 and `alembic current` reports `0003_partial_slug_uniqueness
+  (head)`, so the chain ran. What was *not* done from here is reading back
+  the resulting objects — confirming the two slug indexes are partial and
+  the old constraints are gone. That is one query, and it is worth running
+  (see [verifying it yourself](#verifying-the-live-schema)): Alembic reports
+  the revision it recorded, not the DDL it produced.
+- **No test runs against live PostgreSQL.** The suite still fakes the SQL
+  layer. This is the gap that hid all four defects below, and it is the single
+  most valuable thing left to close. The container run was manual, not a test.
+- **`docker compose up` was never run.** Deliberately: `DATABASE_URL` in the
+  ambient `.env` resolves to a live Supabase instance, so the `migrate`
+  service would have applied pending migrations to production. The individual
+  roles were run by hand against a throwaway database instead.
 - **No load testing.** Every performance statement in these documents is
   reasoning about the design, not a measurement.
-- **The LLM was never called for real.** The chat provider is scripted
-  throughout, deliberately.
+- **Retrieval quality was never measured.** The container run used `hash`
+  embeddings, which are random projections carrying no semantics. It proves
+  the pipeline moves vectors end to end; it says nothing about relevance.
+- **The streaming path was not exercised in a container.** `/answer` was
+  tested only to the point of its 503.
 - **The Mermaid diagrams were not rendered.** No renderer was available here,
   so they have been reviewed as source but not seen as pictures. If one fails
   to draw on GitHub, it is a syntax error in that block, not a claim about the
@@ -168,6 +197,235 @@ Worth recording because they are the reason the tests exist.
 
 ---
 
+## Defects found by running it (2026-10-23)
+
+Five of the six below (9–12 and 14) are kept together because of what they
+have in common: **every one passed the full test suite, and every one
+returned HTTP 500 the first time real code touched a real PostgreSQL.** Four
+surfaced within minutes of pointing the image at a database; the fifth was
+reported by a user clicking a button, and reproduced in minutes once there
+was a real server to reproduce it against. They are the strongest available
+evidence for [gap 2](#2-no-test-runs-against-live-postgresql--the-most-expensive-gap-here),
+and the reason that gap is ranked first among the open ones.
+
+Defect 13 is the odd one out — a container healthcheck, found by reading
+`docker ps` — and is recorded here because it has the same cause: a thing
+that was never run.
+
+Each fix has a regression guard in `tests/test_live_sql_regressions.py`. None
+of those guards can reproduce the original failure — that needs live
+PostgreSQL — so each instead asserts the *property* the fix established, and
+each was confirmed to fail when the fix is reverted. That is a weaker
+guarantee than a real test, and it is stated plainly here because the
+distinction matters: these guards catch a revert, never a new instance of the
+same class.
+
+### 9. Every update-then-return endpoint returned 500 — **critical**
+
+`TimestampMixin.updated_at` carries a server-side `onupdate=func.now()`.
+SQLAlchemy cannot predict what the database clock will produce, so after any
+`UPDATE` it marks the attribute expired and defers a refetch to the next
+access.
+
+Under asyncio that deferral is fatal rather than merely slow. Responses are
+built with `DocumentRead.model_validate(document)`, and pydantic reads
+attributes from *synchronous* validator code, where a lazy load has no
+greenlet to run in:
+
+```
+pydantic_core.ValidationError: 1 validation error for DocumentRead
+updated_at
+  Error extracting attribute: MissingGreenlet: greenlet_spawn has not been
+  called; can't call await_() here.
+```
+
+Confirmed on `POST .../documents`, `PATCH .../namespaces/{id}` and
+`PATCH .../collections/{id}` — i.e. most of the write surface. Document upload
+was the worst case: the row and its job committed, so the document really was
+queued and really did get indexed, and the client was told the upload failed.
+
+`expire_on_commit=False` was already set on the session and does not help —
+the expiry comes from the flush that issued the `UPDATE`, not from the commit.
+Fixed with `__mapper_args__ = {"eager_defaults": True}` on `Base`, which
+fetches server-computed columns through `RETURNING` in the same statement.
+PostgreSQL supports `RETURNING` on `UPDATE`, so this costs no extra round trip
+and keeps the database clock authoritative — the alternative, moving the
+timestamp into Python, would have traded a correct clock for a convenient one.
+
+### 10. The whole conversation surface failed without an LLM key — **high**
+
+FastAPI resolves the entire dependency tree before an endpoint body runs.
+`ChatService` is a dependency of *every* conversation endpoint — list, create,
+rename, delete — and it asked for a `ChatProvider`, which `get_llm` built
+eagerly. A deployment with no LLM key therefore failed on all of them, not
+only on answering, contradicting the README's promise that "uploads and search
+work without one".
+
+Fixed with `LazyChatProvider`, which defers construction to first real use.
+`stream` is deliberately left as a plain method rather than `async def`: the
+caller owns the generator and closes it on client disconnect, which is what
+cancels the upstream request.
+
+### 11. Creating a conversation required a working model — **medium**
+
+Narrower than the above and surviving the same fix: `ChatService.create`
+stamped the row with `self._llm.model`, and merely *asking* the provider for
+its name was enough to build it. Starting a conversation makes no model call
+and should not need one. Now read from `settings.llm_model`, which is the same
+value — the provider is constructed from that setting.
+
+### 12. A misconfigured provider was reported as an internal error — **medium**
+
+`LLMConfigurationError` is mapped to 503 by the answer service, but only for
+errors raised *inside* a generation call. Raised anywhere else it reached the
+catch-all handler and was returned as `500 internal_error`, "An unexpected
+error occurred" — sending an operator hunting for a bug instead of an unset
+variable. Now handled explicitly as `503 upstream_misconfigured`, with the
+provider's own wording logged and never returned.
+
+### 13. Two of the four container roles were permanently `unhealthy` — **low**
+
+Found by reading `docker ps` during cleanup rather than by any test. The
+image carries one `HEALTHCHECK`, written for the `api` role: it curls
+`/health` on the API port. The `worker` and `frontend` roles do not serve
+that endpoint, so both reported `unhealthy` for as long as they ran, while
+working perfectly.
+
+Harmless in this compose file — nothing waits on `service_healthy` for
+either — but not harmless in general: `docker ps` misreports the fleet,
+monitoring alerts on healthy processes, and autoheal-style tooling would
+restart-loop the worker indefinitely.
+
+Fixed per role rather than by weakening the API's check. `frontend` gets
+Streamlit's own endpoint (`/_stcore/health`, port 8501); `worker` has its
+check disabled, because a worker's liveness genuinely is not an HTTP
+question — it holds job leases, and an expired lease is the signal that one
+has died. Verified: `frontend` now reports `healthy`, `worker` reports plain
+`Up`.
+
+### 14. A failed document could never be deleted — **high**
+
+Reported by the author from the UI on 2026-10-23: clicking **Delete** on a
+scanned PDF that had failed extraction returned "An unexpected error
+occurred." Reproduced against a real PostgreSQL in minutes; the suite passes
+it, because the fakes do not enforce CHECK constraints.
+
+`ck_documents_error_message_matches_status` was a biconditional:
+
+```sql
+(status = 'failed') = (error_message IS NOT NULL)
+```
+
+It asserts two things and only the first is right. *A failed document must
+explain itself* — yes. *Nothing else may carry an error* — too strong, because
+deletion moves a document to `deleting` and then `archived` while leaving
+`error_message` in place. For a document that had failed, that `UPDATE`
+violated the CHECK:
+
+```
+psycopg.errors.CheckViolation: new row for relation "documents" violates
+check constraint "ck_documents_error_message_matches_status"
+```
+
+So **no failed document could ever be deleted** — precisely the ones a user
+most wants gone. A scan that could not be OCR'd was unremovable for the life
+of the deployment, and the only reported symptom was a generic 500.
+
+Clearing the message on delete would also satisfy the old rule and needs no
+migration. It is the wrong trade: it destroys the answer to "why is this
+gone?" at the moment that question is being asked. Migration `0004` narrows
+the constraint instead, so it governs the live states and stops governing a
+tombstone — and keeps the `ELSE` branch, because a `ready` document carrying
+a stale error is a real defect that nothing else would catch.
+
+Verified end to end on a real server: `DELETE` now returns 204, the document
+leaves the listing and 404s directly, the tombstone retains its explanation,
+and the four-way truth table still behaves — `ready`+error rejected,
+`failed`+NULL rejected, `ready`+NULL accepted, `failed`+message accepted.
+
+### 15. A transient rate limit killed the conversation turn — **high**
+
+Reported from the UI on 2026-10-23:
+
+```
+openrouter failed mid-stream: Error code: 429 - {'error': {'message':
+'OpenRouter could not verify available credits for this request in time.
+Retry shortly.', 'code': 429, 'metadata': {'limit_source':
+'openrouter_admission_control', 'headers': {'Retry-After': '10'},
+'provider_name': None}}}
+```
+
+`provider_name: None` places this at OpenRouter's admission control, before
+the request reached a model — so it is an account-level check, not a property
+of the model, and switching models does not help.
+
+The defect is that the service did not retry it. `complete()` retries
+`RateLimitError`; `stream()` retried nothing, by an explicit decision whose
+reasoning was only half right:
+
+> No retry wraps the stream. Once the first token has been handed to the
+> client, a retry would restart the answer mid-sentence.
+
+True after the first token. Before it, nothing has been shown to the user and
+a retry is invisible — which is exactly what the non-streaming path already
+does. The provider was *asking* to be retried, with a `Retry-After: 10`
+header, and a single transient 429 became a dead turn.
+
+`stream()` now retries while `emitted` is False and stops the moment a delta
+has gone out. `Retry-After` is honoured when the provider sends a usable one,
+capped at `MAX_RETRY_AFTER_SECONDS` so a remote system cannot pin a request
+open; otherwise the same exponential-with-jitter curve as `retry_async`.
+Configuration errors are still never retried.
+
+**Not verified against a live 429.** Six tests cover the boundary, including
+that a failure *after* the first token is not retried, and they fail when the
+retry is removed. But 38 concurrent live streams through OpenRouter all
+succeeded, so the real rate limiter could not be provoked on demand; the
+live path remains tested only in simulation.
+
+### 16. The raw provider error was stored and rendered to the user — **medium**
+
+Found while reading the screenshot for defect 15: the UI displayed
+OpenRouter's entire error payload. The service's stated contract is the
+opposite —
+
+> The provider's own wording is logged but never returned: upstream errors
+> routinely quote the request back, which here would mean echoing the prompt
+> - and with it the retrieved passages - to the client.
+
+— and the live SSE `error` event does honour it, carrying the translated
+`AppError.message`. The leak was on a second path: `stream_turn` stored
+`outcome.error = str(exc)`, that string was persisted on the message row, and
+`frontend/views/chat.py` renders it when replaying history. So the sanitised
+message was shown once and the raw one every time afterwards.
+
+Harmless in this instance — a rate-limit payload — but the class is not: the
+same line would persist and re-display a 400 that quoted the prompt back,
+including the retrieved passages. Now stores the translated message; the raw
+text stays in the logs, joined to the turn by the request id.
+
+### Also: migration 0003 failed the first time it was executed
+
+Not a defect in the application, but a direct refutation of this document's
+earlier claim that rendering a migration offline verifies it. `0003` was
+checked with `alembic upgrade 0002:head --sql`, which renders SQL without
+running it. Executed against a real database it failed:
+
+```
+psycopg.errors.DependentObjectsStillExist: cannot drop index
+uq_namespaces_slug because constraint uq_namespaces_slug on table
+namespaces requires it
+```
+
+Revision `0001` created those as `UniqueConstraint`s, and PostgreSQL backs
+every unique constraint with an index of the same name, which `DROP INDEX`
+refuses to remove. Fixed by dropping the constraint first; now verified by a
+full `upgrade → downgrade → upgrade` round trip against a real server. **The
+`--sql` row has been removed from the verification table above**, because it
+certified nothing.
+
+---
+
 ## Examined and found correct
 
 Recorded so a future reviewer knows these were looked at rather than skipped.
@@ -206,16 +464,28 @@ with connection pooling in ways that need care — a transaction pooler hands a
 connection to another client between transactions, so the session variable
 must be set per transaction, not per connection.
 
-### 2. No test runs against live PostgreSQL
+### 2. No test runs against live PostgreSQL — the most expensive gap here
 
-The fakes can drift from the real SQLAlchemy repositories, and the things the
-fakes cannot model are precisely the things most worth testing: constraint
-violations, cascade behaviour, the `FOR UPDATE SKIP LOCKED` claim under
-contention, and the partial indexes added in `0003`.
+This is no longer a theoretical risk. On 2026-10-23 it cost four defects,
+[all of them 500s](#defects-found-by-running-it-2026-10-23), one critical and
+affecting most of the write surface. Every one passed the full suite; every
+one appeared within minutes of pointing the image at a real database. The
+suite's own green result was, for this class of bug, actively misleading.
 
-`tests/test_schema.py` pins the table set and the new tests assert index
-*definitions*, which is a partial guard. The real answer is testcontainers in
-CI.
+The fakes can drift from the real SQLAlchemy repositories, and what they
+cannot model is precisely what is most worth testing: constraint violations,
+cascade behaviour, server-side defaults and `onupdate` (defect 9 lived exactly
+there), the `FOR UPDATE SKIP LOCKED` claim under contention, and the partial
+indexes added in `0003`.
+
+`tests/test_schema.py` pins the table set, and
+`tests/test_live_sql_regressions.py` asserts the properties the four fixes
+established — but a property guard only catches a *revert*, never a new
+instance of the same class. The real answer is testcontainers in CI, running
+the existing suite a second time against a real server. Until that exists,
+**a green suite is not evidence that a write path works**, and any change to
+a model's columns, mapper arguments or response serialization should be
+exercised against a real database by hand before it is trusted.
 
 ### 3. Rate limiting
 
@@ -274,15 +544,72 @@ per-process, so scaling the frontend needs sticky sessions.
 
 ---
 
+## Verifying the live schema
+
+`alembic current` reports the revision Alembic *recorded*, not the objects it
+produced — and `0003` is a revision whose whole purpose is to change the shape
+of two indexes. Reading them back is the check that actually closes the loop.
+Run this against the migrated database; it is read-only:
+
+```sql
+-- Both rows must end in: WHERE (deleted_at IS NULL)
+SELECT indexname, indexdef
+  FROM pg_indexes
+ WHERE indexname IN ('uq_namespaces_slug', 'uq_collections_namespace_id_slug');
+
+-- Must return no rows: the old global constraints should be gone, not
+-- merely shadowed. A constraint here means 0003's drop silently did nothing
+-- and slug reuse after a soft delete is still impossible.
+SELECT conname
+  FROM pg_constraint
+ WHERE conname IN ('uq_namespaces_slug', 'uq_collections_namespace_id_slug');
+```
+
+Expected: two `CREATE UNIQUE INDEX ... WHERE (deleted_at IS NULL)` rows from
+the first query, zero rows from the second. That is the state verified on a
+throwaway PostgreSQL 17, including across a full
+`upgrade → downgrade → upgrade` round trip.
+
+---
+
 ## Things the author should act on
 
-1. **Rotate the OpenAI key in `.env`.** It was exposed in this working
-   session. Rotating it is the only remedy; nothing else in this report
-   substitutes for it.
-2. **Fix `EMBEDDING_MODEL` in `.env`.** It is currently
-   `openai/text-embedding-3-small` with `EMBEDDING_PROVIDER=openai`, which
-   fails validation at start-up. Use `text-embedding-3-small`.
-3. **Apply migrations `0002` and `0003`** to the Supabase instance when you
-   are ready. Both are pending and neither was run from here.
-4. **Build the Docker image** and bring the compose stack up once. It has not
-   been executed.
+1. **Rotate both API keys in `.env` — the OpenAI one and the OpenRouter one.**
+   Both were exposed in working-session output. Rotating them is the only
+   remedy; nothing else in this report substitutes for it. The OpenRouter key
+   is still live: it was used on 2026-10-23 to verify model behaviour, and
+   answered.
+2. **Apply migration `0004` to the Supabase instance.** `0002` and `0003`
+   were applied there on 2026-10-23, but `0004_deletable_failed_documents`
+   postdates that run and is what makes a failed document deletable at all —
+   until it is applied, every `DELETE` of a failed document returns 500 on
+   that database. `alembic upgrade head`. Also worth the one query that reads
+   back `0003`'s objects; see
+   [verifying it yourself](#verifying-the-live-schema).
+3. **Add testcontainers to CI.** With item 2 done, this is the most valuable
+   thing left on the list by a wide margin — it is placed below item 1 only
+   because a leaked key is urgent in a way that tooling is not. See
+   [gap 2](#2-no-test-runs-against-live-postgresql--the-most-expensive-gap-here)
+   for what its absence cost in a single afternoon.
+4. **Run `docker compose up` once, with a `.env` that does not point at
+   production.** The four roles are each verified; their composition — the
+   `depends_on` ordering, the shared `rag-data` volume, the one-shot
+   `migrate` service — is not. Still worth a throwaway `DATABASE_URL`: the
+   migration chain is at head now, so `migrate` would be a no-op, but
+   `compose up` also starts an API and a worker that would read and write
+   that database, and the compose file's Postgres service is not where your
+   data lives.
+5. **Decide the embedding model deliberately, and then leave it alone.** A
+   collection's vector width is fixed when it is created, so changing
+   `EMBEDDING_MODEL` to a model of a different width strands every existing
+   collection. `nvidia/nemotron-3-embed-1b` and its `:free` variant are now
+   in the registry at their verified 2048 dimensions.
+6. **Avoid reasoning models for `LLM_MODEL` unless `LLM_MAX_TOKENS` is raised
+   to match.** OpenRouter counts reasoning tokens against `max_tokens`.
+   Measured on 2026-10-23: `stepfun/step-3.5-flash` spent 15 of a 16-token
+   budget on hidden reasoning and returned `content: null`, which
+   `openai_compatible.py` coerces to `""` — a silently empty answer that
+   looks like a broken application rather than an exhausted budget.
+   `stepfun/step-3.7-flash` and `anthropic/claude-sonnet-5.5` use no
+   reasoning tokens and answer correctly, with citation markers intact, at
+   the default 1024.

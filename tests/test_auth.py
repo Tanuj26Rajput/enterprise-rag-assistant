@@ -190,7 +190,9 @@ class TestCurrentUser:
         await register(client, "ada@example.com")
         user_id = next(iter(store.users))
         forged = Settings(
-            DATABASE_URL=str(settings.database_url), SECRET_KEY="a-completely-different-secret"
+            _env_file=None,
+            DATABASE_URL=str(settings.database_url),
+            SECRET_KEY="a-completely-different-secret",
         )
         token, _ = create_access_token(user_id, forged)
 

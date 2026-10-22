@@ -65,6 +65,27 @@ KNOWN_MODELS: dict[tuple[str, str], EmbeddingModelSpec] = {
         dimensions=1536,
         supports_dimension_override=False,
     ),
+    # The one OpenRouter model this registry vouches for itself. OpenRouter
+    # does serve an embeddings endpoint, but it fronts models at many widths
+    # and most of what it routes is chat-only - so entries here are added one
+    # at a time, against the vendor's own specification, never inferred.
+    #
+    # NVIDIA's NIM reference states a native width of 2048 and no reduced
+    # sizes, so `supports_dimension_override` stays False: asking this model
+    # for a shorter vector is a configuration error, not a truncation request.
+    # OpenRouter exposes the same weights under a `:free` variant suffix,
+    # which is a routing/billing tier rather than a different model, so both
+    # ids resolve to one spec.
+    ("openrouter", "nvidia/nemotron-3-embed-1b"): EmbeddingModelSpec(
+        provider="openrouter",
+        model="nvidia/nemotron-3-embed-1b",
+        dimensions=2048,
+    ),
+    ("openrouter", "nvidia/nemotron-3-embed-1b:free"): EmbeddingModelSpec(
+        provider="openrouter",
+        model="nvidia/nemotron-3-embed-1b:free",
+        dimensions=2048,
+    ),
     # Deterministic, offline, no API key. Development and tests only - the
     # vectors carry no semantics, so retrieval quality is meaningless.
     ("hash", "hash-256"): EmbeddingModelSpec(provider="hash", model="hash-256", dimensions=256),
@@ -138,11 +159,12 @@ def _resolve_unknown(
         if declared_dimensions is None:
             raise EmbeddingConfigurationError(
                 f"OpenRouter model {model!r} has no registered embedding dimension. "
-                "OpenRouter routes chat completions; most of the models it fronts expose no "
-                "embeddings endpoint, and the ones that do are not interchangeable. Either "
-                "point EMBEDDING_PROVIDER at a dedicated embeddings provider, or set "
-                "EMBEDDING_DIMENSIONS explicitly to vouch for this model's output width - "
-                "it is verified against the first real response before anything is indexed."
+                "OpenRouter does serve embeddings, but it fronts many models at differing "
+                "widths and this registry has no entry for that one - and a wrong width is "
+                "not an error anyone notices, it is a collection full of unusable vectors. "
+                "Set EMBEDDING_DIMENSIONS explicitly to vouch for this model's output width "
+                "(the model card states it); it is verified against the first real response "
+                "before anything is indexed."
             )
         return EmbeddingModelSpec(
             provider="openrouter", model=model, dimensions=declared_dimensions

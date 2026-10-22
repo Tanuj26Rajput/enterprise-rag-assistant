@@ -18,7 +18,7 @@ from frontend.state import client, guard, items, require_namespace
 
 def render() -> None:
     st.title("Search")
-    st.caption("The retrieval step on its own — the passages, before any model sees them.")
+    st.caption("Find the passages themselves, without asking a question about them.")
 
     namespace = require_namespace()
     if namespace is None:

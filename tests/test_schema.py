@@ -58,9 +58,12 @@ def test_documents_namespace_cannot_drift_from_its_collection() -> None:
 
 def test_transaction_pooler_is_detected_from_the_url() -> None:
     pooled = Settings(
-        DATABASE_URL="postgresql://u:p@aws-0-ap-south-1.pooler.supabase.com:6543/postgres"
+        _env_file=None,
+        DATABASE_URL="postgresql://u:p@aws-0-ap-south-1.pooler.supabase.com:6543/postgres",
     )
-    direct = Settings(DATABASE_URL="postgresql://u:p@db.project.supabase.co:5432/postgres")
+    direct = Settings(
+        _env_file=None, DATABASE_URL="postgresql://u:p@db.project.supabase.co:5432/postgres"
+    )
 
     assert pooled.uses_transaction_pooler
     # Prepared statements cannot survive transaction-mode pooling.
@@ -71,6 +74,7 @@ def test_transaction_pooler_is_detected_from_the_url() -> None:
 
 def test_migrations_use_the_direct_endpoint_when_configured() -> None:
     settings = Settings(
+        _env_file=None,
         DATABASE_URL="postgresql://u:p@aws-0-ap-south-1.pooler.supabase.com:6543/postgres",
         DATABASE_DIRECT_URL="postgresql://u:p@db.project.supabase.co:5432/postgres",
     )
@@ -101,4 +105,4 @@ def test_production_refuses_an_unsafe_configuration(
     config.update(overrides)
 
     with pytest.raises(ValueError, match=expected):
-        Settings(**config)
+        Settings(_env_file=None, **config)

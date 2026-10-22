@@ -109,6 +109,15 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # The image's HEALTHCHECK probes /health on the API port, which only the
+    # `api` role serves. Left in place here the worker reports `unhealthy`
+    # forever: `docker ps` misreports the fleet, monitoring alerts on a
+    # process that is working, and autoheal-style tooling restart-loops it.
+    # A worker's liveness is not an HTTP question - it holds job leases, and
+    # an expired lease is what signals a dead worker, so there is nothing to
+    # replace this with.
+    healthcheck:
+      disable: true
     # Safe to raise: workers claim jobs with FOR UPDATE SKIP LOCKED, so N of
     # them divide the queue with no coordination. See the Chroma caveat in
     # docs/trade-offs.md before going past 1 with the embedded store.
@@ -132,6 +141,14 @@ services:
     depends_on:
       - api
     restart: unless-stopped
+    # Streamlit serves its own health endpoint on its own port, so the image's
+    # API-shaped check is replaced rather than disabled.
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
 
 volumes:
   postgres-data:

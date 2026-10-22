@@ -45,10 +45,12 @@ docker compose up --build
 
 → UI on <http://localhost:8501>, API docs on <http://localhost:8000/docs>.
 
-> The image has **not been built or run from this repository** — the Docker
-> daemon was unavailable during development. The Dockerfile and compose file
-> are syntactically valid and the compose schema validates; treat the first
-> build as unverified. See [docs/audit.md](docs/audit.md#what-was-not-verified).
+> The image builds, and all four roles (`migrate`, `api`, `worker`,
+> `frontend`) have been run against a real PostgreSQL — see
+> [docs/audit.md](docs/audit.md#verified-in-containers-2026-10-23) for exactly
+> what was checked. `docker compose up` as a whole has **not** been run: give
+> it a `.env` that does not point at a database you care about, because the
+> `migrate` service applies pending migrations on start.
 
 ### Local
 
@@ -121,7 +123,7 @@ app/
   worker.py     the ingestion worker
 frontend/       Streamlit UI — talks only to the API
 migrations/     Alembic
-tests/          472 tests
+tests/          494 tests
 docs/           architecture · api · environment · trade-offs · troubleshooting · audit
 ```
 
@@ -179,12 +181,32 @@ change:
 `ENVIRONMENT=production` refuses to start with a weak `SECRET_KEY`, `DEBUG`
 on, a wildcard `CORS_ORIGINS`, or hash embeddings.
 
+### Two configuration traps worth naming
+
+**A collection's embedding width is fixed when it is created.** Changing
+`EMBEDDING_MODEL` to a model of a different width does not migrate anything;
+it strands every collection built with the old one. Decide before you index.
+Models the registry knows are listed in `app/embeddings/registry.py`, each
+with its width stated — including `nvidia/nemotron-3-embed-1b` at 2048. An
+OpenRouter model that is not listed needs `EMBEDDING_DIMENSIONS` set
+explicitly, which is you vouching for the number; it is checked against the
+first real response before anything is indexed.
+
+**Reasoning models need a much larger `LLM_MAX_TOKENS` than they look like
+they do.** The budget covers reasoning tokens as well as the answer, and the
+reasoning comes first. Measured: `stepfun/step-3.5-flash` given 16 tokens
+spent 15 of them thinking and returned `content: null`, which becomes an
+empty answer rather than an error — the failure looks like a broken
+application, not an exhausted budget. `stepfun/step-3.7-flash` and
+`anthropic/claude-sonnet-5.5` use no reasoning tokens and answer correctly,
+citations intact, at the default 1024.
+
 ---
 
 ## Testing
 
 ```bash
-pytest -q                      # 472 passed
+pytest -q                      # 494 passed
 ruff check . && ruff format --check .
 ```
 
@@ -225,11 +247,16 @@ Stated here rather than discovered later. Full detail in
 - **Tenant isolation is enforced in application code**, not by PostgreSQL
   row-level security.
 - **No rate limiting.** Deploy behind something that provides it.
-- **No test runs against live PostgreSQL** — the SQL layer is faked.
+- **No test runs against live PostgreSQL** — the SQL layer is faked. This is
+  the costliest gap in the project: running the image against a real database
+  immediately exposed four 500s that the whole suite passes over. Treat a
+  green suite as no evidence at all that a write path works.
 - **No refresh-token revocation.** Signing out discards the client's copy;
   the token stays valid until it expires.
-- **The Docker image has not been built here**, and migrations `0002` and
-  `0003` are pending against the configured database.
+- **The migrated Supabase schema has not been read back.** `0002` and `0003`
+  applied on 2026-10-23 and Alembic reports head, but Alembic reports the
+  revision it recorded, not the DDL it produced. One query confirms it —
+  [docs/audit.md](docs/audit.md#verifying-the-live-schema).
 
 ---
 

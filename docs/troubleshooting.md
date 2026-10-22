@@ -89,6 +89,33 @@ Over `MAX_UPLOAD_SIZE_MB` (default 25). If you raise it, raise your reverse
 proxy's limit too — nginx's `client_max_body_size` defaults to 1 MB and will
 reject the request before this service sees it.
 
+### Deleting a `failed` document returns 500
+
+Fixed by migration `0004_deletable_failed_documents`; if you see it, that
+revision has not been applied. Run `alembic upgrade head`.
+
+The cause was a CHECK constraint written as a biconditional — a failed
+document must carry an error message, and nothing else may. Deletion moves a
+document to `deleting` and then `archived` while keeping the message, so for
+a previously-failed document the `UPDATE` violated the constraint:
+
+```
+psycopg.errors.CheckViolation: new row for relation "documents" violates
+check constraint "ck_documents_error_message_matches_status"
+```
+
+The symptom is a generic 500 with a request id; the cause is only in the
+logs. Confirm which rule your database has:
+
+```sql
+SELECT pg_get_constraintdef(oid) FROM pg_constraint
+ WHERE conname = 'ck_documents_error_message_matches_status';
+```
+
+A `CASE status WHEN 'failed' ... WHEN 'deleting' THEN true ...` is the fixed
+form. A bare `(status = 'failed') = (error_message IS NOT NULL)` is the old
+one, and every failed document in that database is undeletable.
+
 ### 403 `This workspace is deactivated` / `The collection … is deactivated`
 
 Someone set `is_active: false`. Reactivate with
@@ -181,6 +208,72 @@ The `outcome` label distinguishes a timeout from a rate limit from an auth
 failure. Check that `LLM_PROVIDER` matches the key you set — an
 `OPENAI_API_KEY` is never sent to OpenRouter, deliberately.
 
+### 503 `The answer service is not correctly configured`
+
+A distinct code — `upstream_misconfigured` — because retrying will not help.
+No key is set for the configured provider, or `LLM_MODEL` is a bare name
+while `LLM_PROVIDER=openrouter` (OpenRouter namespaces every model by vendor,
+so `gpt-4o-mini` is a 404 and `openai/gpt-4o-mini` is not).
+
+The provider's own wording is in the logs, never in the response — upstream
+errors routinely quote the request back, which here would mean echoing the
+prompt and the retrieved passages to the client. Join them on the request id:
+
+```bash
+docker logs <api-container> | grep <request_id-from-the-error-body>
+```
+
+Everything except answering keeps working in this state, deliberately:
+uploads, indexing, search, and the whole conversation surface do not need a
+model.
+
+### The answer is empty, but the request succeeded
+
+`finish_reason: length` with no content. The model is a **reasoning** model
+and spent the entire `LLM_MAX_TOKENS` budget on hidden reasoning tokens
+before writing anything. OpenRouter counts those against `max_tokens`, and
+the client coerces a null content to `""` — so this surfaces as a blank
+answer rather than an error, which looks like a broken application.
+
+Confirm it by reading the usage block:
+
+```bash
+curl -s https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"'"$LLM_MODEL"'","max_tokens":1024,
+       "messages":[{"role":"user","content":"Reply with the single word: ok"}]}' \
+  | jq '{finish: .choices[0].finish_reason,
+         content: .choices[0].message.content,
+         reasoning_tokens: .usage.completion_tokens_details.reasoning_tokens}'
+```
+
+A non-zero `reasoning_tokens` is the diagnosis. Either raise
+`LLM_MAX_TOKENS` well above the reasoning overhead, or pick a model that
+does not reason — measured, `stepfun/step-3.7-flash` and
+`anthropic/claude-sonnet-5.5` report `reasoning_tokens: 0` and answer
+correctly at the default 1024, while `stepfun/step-3.5-flash` does not.
+
+### `429` / `openrouter_admission_control` — "could not verify available credits"
+
+An account-level check, not a model one. `provider_name: None` in the error
+metadata means the request never reached a model, so **switching models does
+not help** — the same limit applies to all of them, free tiers included.
+
+The service now retries this automatically when it happens before the first
+token, honouring the provider's `Retry-After`. Seeing it reach the UI means
+either every attempt was rejected (`LLM_MAX_ATTEMPTS`, default 3) or the
+failure arrived *after* streaming had begun, which is deliberately not
+retried — a retry there would splice two different answers together.
+
+If it is persistent rather than occasional:
+
+- Slow the request rate for the account; this limiter is per-account, so
+  parallel questions from several users compound.
+- Add credits. The admission-control check is specifically about verifying
+  available credit, and it fires more readily on a zero-balance free tier.
+- Raise `LLM_MAX_ATTEMPTS`, which costs latency on a genuinely dead provider.
+
 ### Every answer is `has_sufficient_evidence: false`
 
 The model is being honest and retrieval is bringing back nothing useful.
@@ -218,6 +311,34 @@ SQLite-backed and supports **one** writer.
 Set `WEB_CONCURRENCY=1`, run one worker replica, and for anything larger move
 Chroma to its own service with `CHROMA_HOST`. Full explanation in
 [trade-offs.md](trade-offs.md#chromadb-persistence-and-its-limits).
+
+### 500 and `MissingGreenlet: greenlet_spawn has not been called`
+
+Raised while serializing a row that was just updated, naming `updated_at` or
+another server-computed column:
+
+```
+Error extracting attribute: MissingGreenlet: greenlet_spawn has not been
+called; can't call await_() here.
+```
+
+A server-side default or `onupdate` leaves the attribute expired after an
+`UPDATE`, and pydantic reads attributes synchronously, where the deferred
+reload has no greenlet to run in. `Base` sets
+`__mapper_args__ = {"eager_defaults": True}` to fetch those values through
+`RETURNING` in the same statement, which is what prevents it.
+
+If this reappears, a model has almost certainly declared its own
+`__mapper_args__`, which *replaces* the base mapping rather than merging with
+it — so the setting is lost for that one table. Merge it back in:
+
+```python
+__mapper_args__ = {**Base.__mapper_args__, "polymorphic_identity": "..."}
+```
+
+`tests/test_live_sql_regressions.py` guards this. Note that
+`expire_on_commit=False` does not help here: the expiry is set by the flush
+that issued the `UPDATE`, not by the commit.
 
 ### `prepared statement "_pg3_0" already exists`
 
