@@ -1,115 +1,127 @@
 # Enterprise Multi-Document RAG Assistant
 
-A multi-tenant retrieval-augmented generation service. Teams upload documents
-into isolated workspaces, ask questions in natural language, and get answers
-that **cite the passages they came from** — or say plainly that the documents
-do not contain an answer.
+## 1. Project overview
 
-FastAPI · PostgreSQL · ChromaDB · OpenRouter · Streamlit
+A multi-tenant Retrieval-Augmented Generation (RAG) assistant. Teams create
+isolated workspaces, upload documents, and ask questions in plain English.
+The system retrieves the relevant passages and answers with real citations
+— or says it doesn't know, instead of guessing.
 
----
-
-## What it does
-
-- **Multi-tenant by construction.** Workspaces (namespaces) with four roles.
-  Every query is tenant-filtered, every vector carries its tenant triple, and
-  non-membership returns 404 so namespace ids cannot be enumerated.
-- **Ingests PDF, DOCX, TXT and Markdown.** Validated by magic bytes, not by
-  file extension. Extracted with page numbers where the format has them,
-  chunked on token boundaries with overlap.
-- **Answers with citations that cannot be invented.** The model emits
-  bracketed markers and nothing else; this service resolves them against the
-  passages it actually supplied. A marker naming a passage that was not
-  supplied is deleted from the answer. Document names, pages and excerpts
-  come from the database.
-- **Says "I don't know".** When the retrieved passages do not support an
-  answer, the response says so instead of composing something plausible.
-- **Streams.** Server-sent events, with citations in the final event, correct
-  handling of client disconnects and in-band reporting of upstream failures.
-- **Survives failure.** Ingestion is a durable job in PostgreSQL with leases,
-  bounded retries, exponential backoff, dead-lettering and crash recovery.
-  Permanent failures are not retried three times.
-- **Is observable.** Structured JSON logs with a request id threaded through
-  every line, Prometheus metrics, and separate liveness and readiness probes.
+Built with FastAPI, PostgreSQL, ChromaDB, OpenRouter and Streamlit.
 
 ---
 
-## Quick start
+## 2. Main features
 
-### Docker
+- **Multi-tenant workspaces** ("namespaces") with four roles: owner, admin,
+  member, viewer. One team's documents are never visible to another's.
+- **Document ingestion** for PDF, DOCX, TXT and Markdown, with real file-type
+  validation (checked by file content, not just the extension).
+- **Retrieval-augmented answers with real citations.** The model can only
+  reference passages it was actually given; the backend resolves and
+  verifies every citation before it reaches the user.
+- **"I don't know" when appropriate.** If the retrieved documents don't
+  support an answer, the system says so instead of making one up.
+- **Streaming responses** over Server-Sent Events (SSE), so answers appear
+  token by token like a chat interface.
+- **Resilient ingestion.** Uploads are processed as background jobs with
+  retries and failure tracking, so a bad file doesn't crash anything.
+- **Basic observability.** Structured logs and Prometheus-style metrics.
 
-```bash
-cp .env.example .env     # set SECRET_KEY and one provider key
-docker compose up --build
+---
+
+## 3. Technology stack
+
+| Layer | Technology |
+|---|---|
+| Backend API | FastAPI (Python, async) |
+| Database | PostgreSQL (via SQLAlchemy + Alembic migrations) |
+| Vector search | ChromaDB |
+| Embeddings | OpenAI, OpenRouter, or a local deterministic "hash" provider for testing |
+| Chat / answers | OpenRouter (any compatible chat model) |
+| Frontend | Streamlit |
+| Auth | JWT access + refresh tokens, Argon2 password hashing |
+
+---
+
+## 4. Simple architecture overview
+
+```
+User → Streamlit UI → FastAPI backend → PostgreSQL (users, documents, jobs)
+                                        → ChromaDB (vector search)
+                                        → Embedding provider (for embeddings)
+                                        → OpenRouter (for chat answers)
 ```
 
-→ UI on <http://localhost:8501>, API docs on <http://localhost:8000/docs>.
+The Streamlit UI never talks to the database or any AI provider directly —
+it only calls the FastAPI backend, and holds no secrets. Every decision
+about who can see what is made in the backend.
 
-> The image builds, and all four roles (`migrate`, `api`, `worker`,
-> `frontend`) have been run against a real PostgreSQL — see
-> [docs/audit.md](docs/audit.md#verified-in-containers-2026-10-23) for exactly
-> what was checked. `docker compose up` as a whole has **not** been run: give
-> it a `.env` that does not point at a database you care about, because the
-> `migrate` service applies pending migrations on start.
+A simple diagram of this flow is in
+[docs/diagrams/architecture.md](docs/diagrams/architecture.md). More
+diagrams (deployment, components, database schema, and sequence diagrams)
+are in [docs/diagrams/](docs/diagrams/).
 
-### Local
+---
+
+## 5. Local setup and environment variables
 
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
 
-cp .env.example .env
-alembic upgrade head          # the application never creates tables
-
-python run.py                 # API      → http://127.0.0.1:8000/docs
-streamlit run frontend/app.py # UI       → http://localhost:8501
-python -m app.worker          # only if INGESTION_MODE=background
+cp .env.example .env             # then edit it — see below
 ```
 
-`run.py` exists for Windows, where psycopg's async driver cannot run on the
-default event loop. On Linux, `uvicorn app.main:app` works directly.
+Three variables have no default and must be set:
 
-### Demo data
+| Variable | What it is |
+|---|---|
+| `DATABASE_URL` | Your PostgreSQL connection string |
+| `SECRET_KEY` | Signs login tokens — generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `OPENROUTER_API_KEY` or `OPENAI_API_KEY` | Needed to generate answers (uploads and search still work without one) |
 
-To see the system working without writing your own corpus first, seed a
-fictional one: three accounts, four workspaces, and seventeen documents
-across PDF, DOCX and plain text.
+A couple of others worth knowing:
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `INGESTION_MODE` | `inline` | `inline` processes uploads immediately; `background` uses a separate worker process |
+| `EMBEDDING_PROVIDER` | `openai` | `openai`, `openrouter`, or `hash` (free, offline, used for tests) |
+
+Every other variable, with its default and what happens if it's wrong, is
+documented in [docs/environment.md](docs/environment.md).
+
+---
+
+## 6. Database migrations
+
+The schema is managed entirely by Alembic — the application never creates or
+changes tables on its own.
 
 ```bash
-alembic upgrade head                       # the schema must exist first
-python -m scripts.seed_demo_data --yes     # or set SEED_DEMO_DATA=1
+alembic upgrade head        # apply all pending migrations
+alembic current             # check which migration is currently applied
 ```
 
-Then sign in at <http://localhost:8501> as any of:
+Run this once after setting `DATABASE_URL`, and again any time you pull
+changes that include a new migration file under `migrations/versions/`.
 
-| Email | Password | |
-|---|---|---|
-| `ada.whitfield@example.com` | `Orbital!Demo-Admin-2026` | administrator |
-| `marcus.delacroix@example.com` | `Orbital!Demo-Member-2026` | Engineering + Support |
-| `priya.raghunathan@example.com` | `Orbital!Demo-Viewer-2026` | HR + read-only Product |
+---
 
-Development credentials for fictional accounts, published deliberately. The
-script **refuses to run when `ENVIRONMENT=production`**, and there is no flag
-to override that.
+## 7. Running the backend and the Streamlit UI
 
-The documents are ingested through the real upload, parse, chunk and embed
-pipeline — the same code path an uploaded file takes — so they are indexed
-and citable immediately. Required configuration is the same as for the
-application: `DATABASE_URL`, `SECRET_KEY`, and an `EMBEDDING_PROVIDER` that
-works (`hash` costs nothing and needs no key). Documents are embedded once,
-through whichever provider is configured; no chat model is called unless you
-pass `--with-conversations`, which runs six real question-and-answer turns
-and spends chat tokens.
+```bash
+python run.py                    # backend API → http://127.0.0.1:8000/docs
+streamlit run frontend/app.py    # UI          → http://localhost:8501
+python -m app.worker             # only needed if INGESTION_MODE=background
+```
 
-Seeding is idempotent and never destructive: every step skips what already
-exists, and nothing in the script deletes, resets or overwrites anything.
+`run.py` is used instead of `uvicorn app.main:app` directly because of a
+Windows-specific event loop issue; on Linux/macOS, `uvicorn app.main:app`
+works the same way.
 
-- [docs/demo-credentials.md](docs/demo-credentials.md) — accounts, roles, and
-  the isolation boundaries worth checking by hand.
-- [docs/demo-scenarios.md](docs/demo-scenarios.md) — questions to ask, the
-  documents that answer them, and questions that should be refused.
-
-### Two minutes to a cited answer
+### Try it in two minutes
 
 ```bash
 API=http://127.0.0.1:8000/api/v1
@@ -120,197 +132,135 @@ TOKEN=$(curl -s -X POST $API/auth/register -H 'Content-Type: application/json' \
   -d '{"email":"you@example.com","password":"correct-horse-battery-staple"}' | jq -r .access_token)
 
 NS=$(curl -s -X POST $API/namespaces -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"slug":"acme","name":"Acme"}' | jq -r .id)
+  -d '{"slug":"acme","name":"Acme"}' | jq -r .id)
 
 COL=$(curl -s -X POST $API/namespaces/$NS/collections -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -d '{"slug":"handbook","name":"Handbook"}' | jq -r .id)
+  -d '{"slug":"handbook","name":"Handbook"}' | jq -r .id)
 
 curl -s -X POST $API/namespaces/$NS/collections/$COL/documents \
   -H "Authorization: Bearer $TOKEN" -F "file=@handbook.pdf"
 
 curl -s -X POST $API/namespaces/$NS/collections/$COL/answer \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"question":"How much annual leave carries over?"}' | jq '{answer, citations}'
+  -H "Authorization: Bearer $TOKEN" -d '{"question":"How much annual leave carries over?"}' \
+  | jq '{answer, citations}'
 ```
 
----
+### Or load ready-made demo data
 
-## How it is put together
-
-```
-Streamlit ──HTTP──▶ FastAPI ──▶ PostgreSQL   tenancy · documents · jobs
-(no secrets)                 ├─▶ ChromaDB     embeddings + metadata
-                             ├─▶ Blob store   uploaded originals
-                             ├─▶ OpenAI       embeddings
-                             └─▶ OpenRouter   answers
-                   Worker ───▶ (the same stores; claims jobs with SKIP LOCKED)
-```
-
-Diagrams — architecture, components, ER, sequences and deployment — are in
-**[docs/architecture.md](docs/architecture.md)**.
-
-```
-app/
-  api/          routers, dependencies, SSE framing
-  core/         config, security, exceptions, logging, metrics, retry
-  db/           SQLAlchemy models and session management
-  repositories/ data access; every method is tenant-scoped
-  services/     all business logic and every authorization decision
-  ingestion/    validation, extraction, chunking
-  embeddings/   provider abstraction + model registry
-  llm/          OpenAI-compatible client, prompts
-  vectorstore/  ChromaDB adapter behind an 8-method protocol
-  worker.py     the ingestion worker
-frontend/       Streamlit UI — talks only to the API
-migrations/     Alembic
-scripts/        operator scripts; nothing here is imported by the application
-data/           the demo corpus, authored as Markdown
-tests/          494 tests
-docs/           architecture · api · environment · trade-offs · troubleshooting · audit
-```
-
-**The layering rule:** routers parse and delegate, services decide,
-repositories query, adapters talk to the outside. Nothing calls upward. Every
-namespace-scoped call starts at `NamespaceAuthorizer`, so there is no path to
-a tenant's data that skips the check.
-
----
-
-## Three decisions worth knowing before you read the code
-
-**The queue is a PostgreSQL table.** Workers claim with
-`FOR UPDATE SKIP LOCKED` and hold a lease. No Redis, no broker — because the
-job and the document row it concerns commit in *one transaction*, so "job
-succeeded but the document was never marked ready" is a state this design
-cannot reach.
-
-**Citations are resolved by the application, never by the model.** The
-failure mode of a RAG system is not a wrong answer — a reader can judge
-that. It is a plausible answer with a citation that looks real. Markers are
-the only citation syntax the model is given, so that failure is unreachable.
-
-**Embeddings are configured independently of chat.** OpenRouter fronts *chat*
-models; most have no embeddings endpoint. The shortcut — "they configured
-OpenRouter, so embed through OpenRouter" — produces a deployment that accepts
-uploads and then fails on the first one.
-
-Each of these, with the rejected alternative and the price being paid, is in
-**[docs/trade-offs.md](docs/trade-offs.md)**.
-
----
-
-## Configuration
-
-Three variables have no sensible default:
-
-| Variable | |
-|---|---|
-| `DATABASE_URL` | `postgresql://user:pass@host:5432/db` |
-| `SECRET_KEY` | `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
-| `OPENROUTER_API_KEY` *or* `OPENAI_API_KEY` | Uploads and search work without one; answering returns 503 |
-
-Everything else has a default and is documented in
-**[docs/environment.md](docs/environment.md)**. The two you are most likely to
-change:
-
-- `INGESTION_MODE` — `inline` (default; one process, upload response reports
-  the real outcome) or `background` (a worker claims the job; what a large
-  corpus needs).
-- `EMBEDDING_PROVIDER` — `openai`, `openrouter`, or `hash` for deterministic
-  offline embeddings. `hash` is what lets the entire test suite run with no
-  network and no bill; it is refused in production.
-
-`ENVIRONMENT=production` refuses to start with a weak `SECRET_KEY`, `DEBUG`
-on, a wildcard `CORS_ORIGINS`, or hash embeddings.
-
-### Two configuration traps worth naming
-
-**A collection's embedding width is fixed when it is created.** Changing
-`EMBEDDING_MODEL` to a model of a different width does not migrate anything;
-it strands every collection built with the old one. Decide before you index.
-Models the registry knows are listed in `app/embeddings/registry.py`, each
-with its width stated — including `nvidia/nemotron-3-embed-1b` at 2048. An
-OpenRouter model that is not listed needs `EMBEDDING_DIMENSIONS` set
-explicitly, which is you vouching for the number; it is checked against the
-first real response before anything is indexed.
-
-**Reasoning models need a much larger `LLM_MAX_TOKENS` than they look like
-they do.** The budget covers reasoning tokens as well as the answer, and the
-reasoning comes first. Measured: `stepfun/step-3.5-flash` given 16 tokens
-spent 15 of them thinking and returned `content: null`, which becomes an
-empty answer rather than an error — the failure looks like a broken
-application, not an exhausted budget. `stepfun/step-3.7-flash` and
-`anthropic/claude-sonnet-5.5` use no reasoning tokens and answer correctly,
-citations intact, at the default 1024.
-
----
-
-## Testing
+To explore the app without preparing your own files, seed a fictional demo
+dataset (3 accounts, 4 workspaces, 17 documents):
 
 ```bash
-pytest -q                      # 494 passed
-ruff check . && ruff format --check .
+alembic upgrade head
+python -m scripts.seed_demo_data --yes
 ```
 
-Tests run against a **real** ChromaDB on a temp directory with real
-(deterministic) embeddings. The SQL layer is faked and the chat provider is
-scripted — everything else is the real code path. The reasoning behind that
-split, and its cost, is in
-[docs/trade-offs.md](docs/trade-offs.md#testing-real-chroma-fake-sql-scripted-model).
+Sign in at <http://localhost:8501> with one of the accounts listed in
+[docs/demo-credentials.md](docs/demo-credentials.md), and see
+[docs/demo-scenarios.md](docs/demo-scenarios.md) for example questions to
+ask.
 
 ---
 
-## Operations
+## 8. How document ingestion and RAG work
 
-| Endpoint | Purpose |
+**Ingestion (when you upload a document):**
+
+1. The file's type is validated by its actual content (not just its
+   extension), and it's stored.
+2. The text is extracted (with page numbers, where the format has them).
+3. The text is split into overlapping chunks small enough for the model to
+   use.
+4. Each chunk is turned into a vector embedding and stored in ChromaDB,
+   alongside the original text in PostgreSQL.
+
+**Answering a question (RAG):**
+
+1. The question is embedded the same way as the document chunks.
+2. ChromaDB returns the most similar chunks, scoped to the user's workspace.
+3. Those chunks and the question are sent to the chat model, which is
+   instructed to answer **using only those passages** and to mark its
+   sources as `[1]`, `[2]`, etc.
+4. The backend matches each marker back to the real chunk it refers to and
+   attaches the document name, page number and excerpt. A marker that
+   doesn't match a real, retrieved passage is removed from the answer.
+5. If nothing retrieved actually supports an answer, the response says the
+   documents don't contain an answer, instead of guessing.
+
+See [docs/diagrams/sequence-diagrams.md](docs/diagrams/sequence-diagrams.md)
+for a step-by-step diagram of both flows.
+
+---
+
+## 9. Docker instructions
+
+```bash
+cp .env.example .env        # set SECRET_KEY and one provider API key
+docker compose up --build
+```
+
+This starts PostgreSQL, applies migrations, then starts the API, a
+background worker, and the Streamlit frontend.
+
+→ UI at <http://localhost:8501>, API docs at <http://localhost:8000/docs>.
+
+Use a `.env` pointing at a database you don't mind modifying — migrations
+run automatically when the containers start. See
+[docs/diagrams/deployment.md](docs/diagrams/deployment.md) for what each
+container does and what is *not* part of this deployment (e.g. a production
+database or a load balancer).
+
+---
+
+## 10. API documentation
+
+- Interactive docs (Swagger UI): `http://localhost:8000/docs`, while the
+  backend is running (disabled when `ENVIRONMENT=production`).
+- A grouped, human-readable guide: [docs/api.md](docs/api.md) — covers
+  authentication, namespaces/collections, document upload, chat/streaming,
+  and health checks.
+
+---
+
+## 11. Known limitations
+
+- **Tenant isolation is enforced in application code**, not by
+  database-level row security.
+- **ChromaDB runs embedded** (not as a separate server) and supports only
+  one writer process at a time — fine for this project's scale, not for a
+  large production deployment.
+- **No automated tests run against a real PostgreSQL database** — the test
+  suite uses an in-memory fake for the database layer.
+- **No rate limiting** is built into the application itself.
+- **No reranking, response caching, or production monitoring dashboard.**
+
+More detail, and the reasoning behind each trade-off, is in
+[docs/trade-offs.md](docs/trade-offs.md).
+
+---
+
+## Project structure
+
+```
+app/            FastAPI backend (routers, services, database models, etc.)
+frontend/       Streamlit UI — talks only to the backend API
+migrations/     Alembic database migrations
+scripts/        Operator scripts (e.g. demo data seeding)
+data/           Demo document corpus
+tests/          Automated tests
+docs/           Documentation (see below)
+```
+
+## Documentation index
+
+| Document | What it covers |
 |---|---|
-| `GET /health` | Liveness — consults nothing. Wire this to the liveness probe. |
-| `GET /ready` | Readiness — checks PostgreSQL and the vector store. Wire this to the readiness probe. |
-| `GET /metrics` | Prometheus exposition. Internal only. |
-
-Using `/ready` for liveness turns a database failover into a fleet-wide
-restart loop, which is why they are separate endpoints with separate
-semantics.
-
-Logs are JSON by default, with a `request_id` on every line that also appears
-in the `X-Request-ID` header and in the audit table — one id joins the HTTP
-response, the log, and the audit row.
-
----
-
-## Known limits
-
-Stated here rather than discovered later. Full detail in
-[docs/audit.md](docs/audit.md#known-gaps).
-
-- **Embedded ChromaDB is single-writer.** SQLite-backed: one writing process,
-  local filesystem, no replication, no auth. Hence `WEB_CONCURRENCY=1` and
-  one worker replica. `CHROMA_HOST` is the first step out.
-- **Tenant isolation is enforced in application code**, not by PostgreSQL
-  row-level security.
-- **No rate limiting.** Deploy behind something that provides it.
-- **No test runs against live PostgreSQL** — the SQL layer is faked. This is
-  the costliest gap in the project: running the image against a real database
-  immediately exposed four 500s that the whole suite passes over. Treat a
-  green suite as no evidence at all that a write path works.
-- **No refresh-token revocation.** Signing out discards the client's copy;
-  the token stays valid until it expires.
-- **The migrated Supabase schema has not been read back.** `0002` and `0003`
-  applied on 2026-10-23 and Alembic reports head, but Alembic reports the
-  revision it recorded, not the DDL it produced. One query confirms it —
-  [docs/audit.md](docs/audit.md#verifying-the-live-schema).
-
----
-
-## Documentation
-
-| | |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | Diagrams and the reasoning behind each boundary |
-| [docs/api.md](docs/api.md) | The HTTP surface, the error contract, the SSE client contract |
-| [docs/environment.md](docs/environment.md) | Every variable, and what happens when it is wrong |
-| [docs/trade-offs.md](docs/trade-offs.md) | Each decision, its rejected alternative, and its price |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | Organised by symptom |
-| [docs/audit.md](docs/audit.md) | What was found, fixed, and left open |
-| [docs/demo-credentials.md](docs/demo-credentials.md) | Demo accounts and who can see what |
-| [docs/demo-scenarios.md](docs/demo-scenarios.md) | Questions the demo corpus answers |
+| [docs/diagrams/](docs/diagrams/) | Simple architecture, deployment, components, ER and sequence diagrams |
+| [docs/api.md](docs/api.md) | Grouped API reference with examples |
+| [docs/environment.md](docs/environment.md) | Every environment variable |
+| [docs/trade-offs.md](docs/trade-offs.md) | Why key decisions were made, and their limitations |
+| [docs/demo-credentials.md](docs/demo-credentials.md) | Demo accounts and permissions |
+| [docs/demo-scenarios.md](docs/demo-scenarios.md) | Example questions for the demo data |
+| [docs/architecture.md](docs/architecture.md) | Full detailed architecture (for deeper reading) |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common issues, by symptom |
+| [docs/audit.md](docs/audit.md) | Internal notes on what was tested and what wasn't |
