@@ -69,6 +69,46 @@ python -m app.worker          # only if INGESTION_MODE=background
 `run.py` exists for Windows, where psycopg's async driver cannot run on the
 default event loop. On Linux, `uvicorn app.main:app` works directly.
 
+### Demo data
+
+To see the system working without writing your own corpus first, seed a
+fictional one: three accounts, four workspaces, and seventeen documents
+across PDF, DOCX and plain text.
+
+```bash
+alembic upgrade head                       # the schema must exist first
+python -m scripts.seed_demo_data --yes     # or set SEED_DEMO_DATA=1
+```
+
+Then sign in at <http://localhost:8501> as any of:
+
+| Email | Password | |
+|---|---|---|
+| `ada.whitfield@example.com` | `Orbital!Demo-Admin-2026` | administrator |
+| `marcus.delacroix@example.com` | `Orbital!Demo-Member-2026` | Engineering + Support |
+| `priya.raghunathan@example.com` | `Orbital!Demo-Viewer-2026` | HR + read-only Product |
+
+Development credentials for fictional accounts, published deliberately. The
+script **refuses to run when `ENVIRONMENT=production`**, and there is no flag
+to override that.
+
+The documents are ingested through the real upload, parse, chunk and embed
+pipeline — the same code path an uploaded file takes — so they are indexed
+and citable immediately. Required configuration is the same as for the
+application: `DATABASE_URL`, `SECRET_KEY`, and an `EMBEDDING_PROVIDER` that
+works (`hash` costs nothing and needs no key). Documents are embedded once,
+through whichever provider is configured; no chat model is called unless you
+pass `--with-conversations`, which runs six real question-and-answer turns
+and spends chat tokens.
+
+Seeding is idempotent and never destructive: every step skips what already
+exists, and nothing in the script deletes, resets or overwrites anything.
+
+- [docs/demo-credentials.md](docs/demo-credentials.md) — accounts, roles, and
+  the isolation boundaries worth checking by hand.
+- [docs/demo-scenarios.md](docs/demo-scenarios.md) — questions to ask, the
+  documents that answer them, and questions that should be refused.
+
 ### Two minutes to a cited answer
 
 ```bash
@@ -123,6 +163,8 @@ app/
   worker.py     the ingestion worker
 frontend/       Streamlit UI — talks only to the API
 migrations/     Alembic
+scripts/        operator scripts; nothing here is imported by the application
+data/           the demo corpus, authored as Markdown
 tests/          494 tests
 docs/           architecture · api · environment · trade-offs · troubleshooting · audit
 ```
@@ -270,3 +312,5 @@ Stated here rather than discovered later. Full detail in
 | [docs/trade-offs.md](docs/trade-offs.md) | Each decision, its rejected alternative, and its price |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Organised by symptom |
 | [docs/audit.md](docs/audit.md) | What was found, fixed, and left open |
+| [docs/demo-credentials.md](docs/demo-credentials.md) | Demo accounts and who can see what |
+| [docs/demo-scenarios.md](docs/demo-scenarios.md) | Questions the demo corpus answers |
