@@ -212,7 +212,38 @@ database or a load balancer).
 
 ---
 
-## 10. API documentation
+## 10. Deploying to Streamlit Community Cloud (single process)
+
+Streamlit Cloud only runs one process on one exposed port, so the backend
+can't be deployed separately as it is with Docker above. `streamlit_app.py`
+at the repo root works around that: it starts the FastAPI backend as a
+background subprocess on loopback, waits for it to become healthy, then
+renders the same Streamlit UI from `frontend/app.py` in the foreground.
+
+1. Push this repo to GitHub, then create an app on
+   [share.streamlit.io](https://share.streamlit.io) pointing at it, with
+   **Main file path** set to `streamlit_app.py` (not `frontend/app.py`).
+2. `requirements.txt` already covers both the backend and the frontend, so
+   no changes are needed there.
+3. In the app's **Settings → Secrets**, paste values based on
+   [.streamlit/secrets.toml.example](.streamlit/secrets.toml.example) — at
+   minimum `SECRET_KEY`, `DATABASE_URL`, and one LLM + one embedding provider
+   key. `streamlit_app.py` copies every secret into the process environment,
+   where `app/core/config.py` reads it exactly as it would a `.env` file.
+4. `DATABASE_URL` must point at a database reachable from the internet —
+   Streamlit Cloud has no database of its own. A free
+   [Supabase](https://supabase.com) or [Neon](https://neon.tech) Postgres
+   project both work; migrations run automatically on startup.
+
+Two limitations are inherent to a single free-tier container, not to this
+entrypoint: the local Chroma store (`./var/chroma`) lives on ephemeral disk
+and is wiped on restart (point `CHROMA_HOST`/`CHROMA_PORT` at a hosted Chroma
+instance to avoid that), and there is no separate background worker, so
+`INGESTION_MODE` should stay `inline` (the default).
+
+---
+
+## 11. API documentation
 
 - Interactive docs (Swagger UI): `http://localhost:8000/docs`, while the
   backend is running (disabled when `ENVIRONMENT=production`).
@@ -222,7 +253,7 @@ database or a load balancer).
 
 ---
 
-## 11. Known limitations
+## 12. Known limitations
 
 - **Tenant isolation is enforced in application code**, not by
   database-level row security.

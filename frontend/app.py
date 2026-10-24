@@ -111,4 +111,9 @@ def _sidebar() -> str:
     return page
 
 
-main()
+if __name__ == "__main__":
+    # Guarded rather than a bare call: `streamlit_app.py` imports this module
+    # (as `frontend.app`, not `__main__`) to run it inside the same process as
+    # the backend, and calls `main()` itself on every rerun - a module import
+    # only executes this top level once, on the first import.
+    main()
